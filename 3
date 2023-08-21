@@ -1,0 +1,227 @@
+Sure! Here's an example of a C program that demonstrates how to perform parallel encryption of multiple files from a folder using OpenSSL's EVP library. In this example, we use POSIX threads to handle the parallel processing:
+
+```c
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <dirent.h>
+#include <pthread.h>
+#include <openssl/evp.h>
+
+#define BUF_SIZE 1024
+
+void handleErrors(void) {
+    printf("Error occurred\n");
+    exit(1);
+}
+
+void* encryptFile(void* arg) {
+    const char *key = "your_encryption_key";
+    const char *inputFolder = "input_folder/";
+    const char *outputFolder = "output_folder/";
+
+    const char *filename = (const char *)arg;
+    char inputFile[256];
+    char outputFile[256];
+    snprintf(inputFile, sizeof(inputFile), "%s%s", inputFolder, filename);
+    snprintf(outputFile, sizeof(outputFile), "%s%s.enc", outputFolder, filename);
+
+    FILE *inFile = fopen(inputFile, "rb");
+    FILE *outFile = fopen(outputFile, "wb");
+    if (!inFile || !outFile) {
+        perror("Error opening files");
+        return NULL;
+    }
+
+    const int keyLength = strlen(key);
+
+    EVP_CIPHER_CTX *ctx;
+    ctx = EVP_CIPHER_CTX_new();
+    if (!ctx) handleErrors();
+
+    if (1 != EVP_EncryptInit_ex(ctx, EVP_aes_256_cbc(), NULL, (unsigned char *)key, NULL))
+        handleErrors();
+
+    unsigned char bufferIn[BUF_SIZE];
+    unsigned char bufferOut[BUF_SIZE + EVP_MAX_BLOCK_LENGTH];
+    int bytesRead;
+    int bytesWritten;
+
+    while ((bytesRead = fread(bufferIn, 1, BUF_SIZE, inFile)) > 0) {
+        if (1 != EVP_EncryptUpdate(ctx, bufferOut, &bytesWritten, bufferIn, bytesRead))
+            handleErrors();
+        fwrite(bufferOut, 1, bytesWritten, outFile);
+    }
+
+    if (1 != EVP_EncryptFinal_ex(ctx, bufferOut, &bytesWritten))
+        handleErrors();
+    fwrite(bufferOut, 1, bytesWritten, outFile);
+
+    EVP_CIPHER_CTX_free(ctx);
+    fclose(inFile);
+    fclose(outFile);
+
+    printf("File %s encrypted successfully!\n", filename);
+
+    return NULL;
+}
+
+int main() {
+    const char *inputFolder = "input_folder/";
+
+    DIR *dir;
+    struct dirent *ent;
+    if ((dir = opendir(inputFolder)) != NULL) {
+        pthread_t threads[5];
+        int threadIndex = 0;
+
+        while ((ent = readdir(dir)) != NULL) {
+            if (ent->d_type == DT_REG) {  // Regular file
+                pthread_create(&threads[threadIndex], NULL, encryptFile, ent->d_name);
+                threadIndex++;
+
+                if (threadIndex >= 5) {
+                    for (int i = 0; i < 5; i++) {
+                        pthread_join(threads[i], NULL);
+                    }
+                    threadIndex = 0;
+                }
+            }
+        }
+
+        // Wait for remaining threads to finish
+        for (int i = 0; i < threadIndex; i++) {
+            pthread_join(threads[i], NULL);
+        }
+
+        closedir(dir);
+    } else {
+        perror("Error opening directory");
+        return 1;
+    }
+
+    printf("All files encrypted successfully!\n");
+
+    return 0;
+}
+```
+
+Replace `"your_encryption_key"`, `"input_folder/"`, and `"output_folder/"` with the appropriate values for your use case. Make sure you have the OpenSSL library installed and properly linked, and that you have the required input files in the input folder.
+
+Compile the program and run the resulting executable to perform parallel encryption of files from the input folder.
+
+
+@@
+To restrict the parallel encryption process to only use 6 cores while leaving the other cores free, you can use the `sched_setaffinity` function to bind each thread to specific CPU cores. Here's how you can modify the code to achieve this:
+
+```c
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <dirent.h>
+#include <pthread.h>
+#include <openssl/evp.h>
+#include <sched.h>
+
+#define BUF_SIZE 1024
+
+void handleErrors(void) {
+    printf("Error occurred\n");
+    exit(1);
+}
+
+void* encryptFile(void* arg) {
+    // ... (Same code as before)
+
+    // Set CPU affinity for this thread
+    cpu_set_t cpuset;
+    CPU_ZERO(&cpuset);
+    CPU_SET(0, &cpuset);  // Set to the desired CPU core (0 to 5)
+    if (pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset) != 0)
+        handleErrors();
+
+    // ... (Rest of the code)
+}
+
+int main() {
+    // ... (Same code as before)
+
+    // Set CPU affinity for the main thread
+    cpu_set_t cpuset;
+    CPU_ZERO(&cpuset);
+    CPU_SET(6, &cpuset);  // Set to a different core (6, 7, 8, etc.)
+    if (pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset) != 0)
+        handleErrors();
+
+    // ... (Rest of the code)
+}
+```
+
+In the above code, we are using `pthread_setaffinity_np` to set CPU affinity for each thread and the main thread. The main thread is set to a core other than the ones used by worker threads. This will ensure that the main thread doesn't interfere with the worker threads and that only the specified cores are utilized for parallel encryption.
+
+Replace the numbers in `CPU_SET` with the appropriate core numbers based on your system configuration. For example, if you want to use cores 0 to 5 for encryption and leave cores 6 and above free, you can set the main thread's affinity to a core beyond core 5.
+
+Please note that CPU core numbering and availability can vary depending on your system configuration. Always check your system's CPU layout to determine the correct core numbers to use.
+
+~~~~
+Certainly! Here's the modified code with the CPU affinity settings included for both the worker threads and the main thread:
+
+```c
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <dirent.h>
+#include <pthread.h>
+#include <openssl/evp.h>
+#include <sched.h>
+
+#define BUF_SIZE 1024
+
+void handleErrors(void) {
+    printf("Error occurred\n");
+    exit(1);
+}
+
+void* encryptFile(void* arg) {
+    const char *key = "your_encryption_key";
+    const char *inputFolder = "input_folder/";
+    const char *outputFolder = "output_folder/";
+
+    const char *filename = (const char *)arg;
+    char inputFile[256];
+    char outputFile[256];
+    snprintf(inputFile, sizeof(inputFile), "%s%s", inputFolder, filename);
+    snprintf(outputFile, sizeof(outputFile), "%s%s.enc", outputFolder, filename);
+
+    // ... (Same code as before)
+
+    // Set CPU affinity for this thread
+    cpu_set_t cpuset;
+    CPU_ZERO(&cpuset);
+    CPU_SET(0, &cpuset);  // Set to the desired CPU core (0 to 5)
+    if (pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset) != 0)
+        handleErrors();
+
+    // ... (Rest of the code)
+}
+
+int main() {
+    const char *inputFolder = "input_folder/";
+
+    // ... (Same code as before)
+
+    // Set CPU affinity for the main thread
+    cpu_set_t cpuset;
+    CPU_ZERO(&cpuset);
+    CPU_SET(6, &cpuset);  // Set to a core beyond core 5 (e.g., core 6)
+    if (pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset) != 0)
+        handleErrors();
+
+    // ... (Rest of the code)
+}
+```
+
+Remember to replace `"your_encryption_key"`, `"input_folder/"`, and `"output_folder/"` with the appropriate values for your use case. Also, adjust the CPU core numbers in `CPU_SET` based on your system configuration.
+
+Compile and run the program following the same steps as mentioned earlier. The modified code will ensure that the encryption threads use specific cores (cores 0 to 5) while leaving other cores (core 6 and above) free for other tasks.
+~~~~~~
